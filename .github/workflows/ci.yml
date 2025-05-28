@@ -1,27 +1,63 @@
- jobs:
--  build-and-test:
--    runs-on: ubuntu-latest
--    strategy:
--      fail-fast: false
--      matrix:
--        node-version: [14.x,15.x,16.x,17.x]
-+  build-and-test:
-+    runs-on: ubuntu-latest
-+    strategy:
-+      fail-fast: false
-+      matrix:
-+        # Only test against Node versions supported by your deps
-+        node-version: [20.x, 22.x]
-     steps:
-       - uses: actions/checkout@v3
--      - name: Use Node.js
--        uses: actions/setup-node@v3
--        with:
--          node-version: '18'
-+      - name: Use Node.js ${{ matrix.node-version }}
-+        uses: actions/setup-node@v3
-+        with:
-+          node-version: ${{ matrix.node-version }}
+name: CI
 
-       - name: Install dependencies
-         run: npm ci
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x, 22.x]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'                     # ← turn on npm caching
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build client assets
+        run: npm run build-client
+
+  smoke-test:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: ${{ success() }}                # only run if build-and-test passed
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build client assets
+        run: npm run build-client
+
+      - name: Start server and smoke-test
+        run: |
+          # Start the server in the background
+          nohup npx nodemon server/index.js &> server.log &
+
+          # Wait a few seconds for it to come up
+          sleep 5
+
+          # Hit the homepage
+          curl --fail http://localhost:4000/ 
+
+          # Shutdown nodemon
+          pkill -f "nodemon server/index.js"
