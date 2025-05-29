@@ -83,7 +83,7 @@ Check out the OctoFarm documentation website for installation instructions on va
 ## Installation Development
 ### Requirements
 - Git
-- NodeJS > v14
+- NodeJS > v20
 - npm
 
 
