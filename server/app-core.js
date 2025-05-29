@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const flash = require('connect-flash');
 const session = require('express-session');
@@ -24,17 +25,36 @@ const { LOGGER_ROUTE_KEYS } = require('./constants/logger.constants');
 const { ensureAuthenticated } = require('./middleware/auth');
 const { validateParamsMiddleware } = require('./middleware/validators');
 const { proxyOctoPrintClientRequests } = require('./middleware/octoprint-proxy');
+const rateLimit = require('express-rate-limit');
+const { ensureAuthenticated } = require('./middleware/auth');
 
 const M_VALID = require('./constants/validate-mongo.constants');
 
 const logger = new Logger(LOGGER_ROUTE_KEYS.SERVER_CORE);
+
+// Define a limiter — e.g. max 10 attempts per 1 minutes per IP
+const authLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,   // 15 minutes
+  max: 10,                     // limit each IP to 5 requests per windowMs
+  message:
+    'Too many login attempts from this IP, please try again after 15 minutes',
+  standardHeaders: true,      // Return rate limit info in `RateLimit-*` headers
+  legacyHeaders: false,       // Disable the `X-RateLimit-*` headers
+});
+
+// Apply limiter to your login route
+app.post('/users/login', authLimiter, passport.authenticate('local', {
+  successRedirect: '/',
+  failureRedirect: '/users/login',
+  failureFlash: true
+}));
 
 /**
  *
  * @returns {*|Express}
  */
 function setupExpressServer() {
-  let app = express();
+  const app = express();
 
   app.use(octofarmGlobalLimits);
   app.use(require('sanitize').middleware);
@@ -54,7 +74,7 @@ function setupExpressServer() {
   app.use(helmet.permittedCrossDomainPolicies());
   app.use(helmet.referrerPolicy());
   app.use(helmet.xssFilter());
-
+  app.use('/settings', authLimiter, ensureAuthenticated, settingsRouter);
   app.use(express.json());
 
   const viewsPath = getViewsPath();
@@ -64,13 +84,14 @@ function setupExpressServer() {
   app.use(expressLayouts);
   app.use(express.static(viewsPath));
 
-  app.use('/images', express.static('../images'));
+   // Serve everything in client/ under the /assets URL:
+  const clientBase = path.join(__dirname, '../client/assets');
+  app.use('/assets', express.static(clientBase));
+  app.use('/css',    express.static(path.join(clientBase, 'css')));
+  app.use('/js',     express.static(path.join(clientBase, 'js')));
 
-  if (process.env.NODE_ENV === 'development') {
-    app.use('/assets', express.static('../client/assets'));
-  }else{
-    app.use('/assets', express.static('./assets'));
-  }
+  // Continue with images, cookies, sessions…
+  app.use('/images', express.static(path.join(__dirname, '../images')));
   app.use(cookieParser());
   app.use(express.urlencoded({ extended: false, limit: '2mb' }));
   app.use(
