@@ -26,7 +26,6 @@ const { ensureAuthenticated } = require('./middleware/auth');
 const { validateParamsMiddleware } = require('./middleware/validators');
 const { proxyOctoPrintClientRequests } = require('./middleware/octoprint-proxy');
 const rateLimit = require('express-rate-limit');
-const { ensureAuthenticated } = require('./middleware/auth');
 
 const M_VALID = require('./constants/validate-mongo.constants');
 
