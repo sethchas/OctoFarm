@@ -1,9 +1,9 @@
 // server/utils/env.utils.js
 
-const path = require("path");
-const fs = require("fs");
+const path   = require("path");
+const fs     = require("fs");
 const dotenv = require("dotenv");
-const isDocker = require("is-docker"); // note: isDocker is a function
+const isDocker = require("is-docker");       // <-- THIS IS A BOOLEAN, NOT A FUNCTION
 const Logger = require("../handlers/logger.js");
 const { LOGGER_ROUTE_KEYS } = require("../constants/logger.constants");
 
@@ -59,7 +59,8 @@ function stringifyDotEnv(obj) {
  * If we detect we’re in Docker, bail out early (we don’t persist .env inside containers).
  */
 function writeVariableToEnvFile(absoluteEnvPath, variableKey, variableValue) {
-  if (isDocker()) {
+  // NOTE: isDocker is a BOOLEAN exported by "is-docker"
+  if (isDocker) {
     logger.error("Tried to persist setting to .env in Docker mode. Skipping.");
     return;
   }
@@ -127,7 +128,7 @@ function verifyPackageJsonRequirements(rootPath) {
  */
 function ensureBackgroundImageExists(rootPath) {
   // 1) Where we want <rootPath>/images
-  const targetBgDir = path.join(rootPath, "images");
+  const targetBgDir  = path.join(rootPath, "images");
   const targetBgPath = path.join(targetBgDir, "bg.jpg");
 
   // 2) If /images doesn’t exist, create it:
@@ -147,7 +148,7 @@ function ensureBackgroundImageExists(rootPath) {
     return;
   }
 
-  // 4) Otherwise, copy the default.  (bg_default.jpg is in server/utils alongside this file.)
+  // 4) Otherwise, copy the default. (bg_default.jpg is in server/utils alongside this file.)
   const defaultBgPath = path.join(__dirname, "bg_default.jpg");
   if (!fs.existsSync(defaultBgPath)) {
     logger.error("✗ Cannot find default background at:", defaultBgPath);
@@ -163,6 +164,7 @@ function ensureBackgroundImageExists(rootPath) {
     logger.error("✗ Failed to copy default background:", copyErr);
   }
 }
+
 
 module.exports = {
   isPm2,
