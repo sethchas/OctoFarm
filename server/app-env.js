@@ -1,3 +1,15 @@
+// server/app-env.js
+
+/**
+ * This file handles:
+ *   1) all environment/configuration setup (NODE_ENV, .env parsing, Mongo URI, port, migrations, etc.)
+ *   2) exporting four Express-related functions that app-core.js/app.js will call:
+ *        • setupExpressServer()
+ *        • ensureSystemSettingsInitiated()
+ *        • serveOctoFarmRoutes(app)
+ *        • serveOctoFarmNormally(app, quick_boot)
+ */
+
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
@@ -5,26 +17,26 @@ const isDocker = require('is-docker');
 const envUtils = require('./utils/env.utils');
 const dotenv = require('dotenv');
 const { AppConstants } = require('./constants/app.constants');
-
 const Logger = require('./handlers/logger.js');
 const { status, up } = require('migrate-mongo');
 const { LOGGER_ROUTE_KEYS } = require('./constants/logger.constants');
 
+// Initialize a logger for this module (SERVER_ENVIRONMENT)
 const logger = new Logger(LOGGER_ROUTE_KEYS.SERVER_ENVIRONMENT, false);
 
-// Constants and definition
-const instructionsReferralURL = 'https://docs.octofarm.net/installation/setup-environment.html';
-const deprecatedConfigFolder = '../middleware';
-const deprecatedConfigFilePath = deprecatedConfigFolder + 'db.js';
+// Paths to package.json / package-lock.json, and .env file
 const packageJsonPath = path.join(__dirname, '../package.json');
 const packageLockPath = path.join(__dirname, '../package-lock.json');
 const packageLockFile = require(packageLockPath);
-let currentClientVersion;
 const dotEnvPath = path.join(__dirname, '../.env');
 
+// -----------------------------------------------------------------------------------------------------
+// 1) ENVIRONMENT‐SETUP FUNCTIONS (NODE_ENV, VERSION, MONGO URI, PORT, LOG LEVEL, etc.)
+// -----------------------------------------------------------------------------------------------------
+
 /**
- * Set and write the environment name to file, if applicable
- * @returns {*}
+ * If NODE_ENV is missing or unknown, set it to default production
+ * and write it to .env (unless we're inside Docker).
  */
 function ensureNodeEnvSet() {
   const environment = process.env[AppConstants.NODE_ENV_KEY];
@@ -32,10 +44,10 @@ function ensureNodeEnvSet() {
     const newEnvName = AppConstants.defaultProductionEnv;
     process.env[AppConstants.NODE_ENV_KEY] = newEnvName;
     logger.warning(
-      `NODE_ENV=${environment} was not set, or not known. Defaulting to NODE_ENV=${newEnvName}`
+      `NODE_ENV="${environment}" was not set (or not recognized). Defaulting to NODE_ENV="${newEnvName}".`
     );
 
-    // Avoid writing to .env in case of docker
+    // Don’t write to .env if we’re in Docker
     if (isDocker()) return;
 
     envUtils.writeVariableToEnvFile(
@@ -44,12 +56,14 @@ function ensureNodeEnvSet() {
       newEnvName
     );
   } else {
-    logger.info(`✓ NODE_ENV variable correctly set (${environment})!`);
+    logger.info(`✓ NODE_ENV correctly set: ${environment}`);
   }
 }
 
 /**
- * Ensures that `process.env[AppConstants.VERSION_KEY]` is never undefined
+ * Ensure process.env[VERSION_KEY] is always defined.
+ * If missing, pull from package.json → “version” field, 
+ * set NON_NPM_MODE_KEY = 'true', and log accordingly.
  */
 function ensureEnvNpmVersionSet() {
   const packageJsonVersion = require(packageJsonPath).version;
@@ -57,7 +71,7 @@ function ensureEnvNpmVersionSet() {
     process.env[AppConstants.VERSION_KEY] = packageJsonVersion;
     process.env[AppConstants.NON_NPM_MODE_KEY] = 'true';
     logger.info(
-      `✓ Running OctoFarm version ${process.env[AppConstants.VERSION_KEY]} in non-NPM mode!`
+      `✓ Running OctoFarm version ${packageJsonVersion} in non-NPM mode!`
     );
   } else {
     logger.debug(
@@ -65,82 +79,29 @@ function ensureEnvNpmVersionSet() {
     );
   }
 
+  // If the env VAR doesn’t match package.json, overwrite it
   if (process.env[AppConstants.VERSION_KEY] !== packageJsonVersion) {
     process.env[AppConstants.VERSION_KEY] = packageJsonVersion;
     logger.warning(
-      `~ Had to synchronize OctoFarm version to '${packageJsonVersion}' as it was outdated.`
+      `~ Synchronized OctoFarm version to ${packageJsonVersion} (it was outdated).`
     );
   }
 }
 
 /**
- *
- * @param reason
- */
-function removePm2Service(reason) {
-  logger.error('Removing PM2 service as OctoFarm failed to start', reason);
-  execSync('pm2 delete OctoFarm');
-}
-
-/**
- *
- * @param folder
- */
-function removeFolderIfEmpty(folder) {
-  return fs.rmdir(folder, function (err) {
-    if (err) {
-      logger.error(`~ Could not clear up the folder ${folder} as it was not empty`);
-    } else {
-      logger.info(`✓ Successfully removed the empty directory ${folder}`);
-    }
-  });
-}
-
-/**
- *
- */
-function setupPackageJsonVersionOrThrow() {
-  const result = envUtils.verifyPackageJsonRequirements(path.join(__dirname, '../server'));
-  if (!result) {
-    if (envUtils.isPm2()) {
-      removePm2Service('didnt pass startup validation (package.json)');
-    }
-    throw new Error('Aborting OctoFarm server.');
-  }
-}
-
-/**
- * Print out instructions URL
- */
-function printInstructionsURL() {
-  logger.info(
-    `Please make sure to read ${instructionsReferralURL} on how to configure your environment correctly.`
-  );
-}
-
-/**
- *
- */
-function removeDeprecatedMongoURIConfigFile() {
-  logger.info("~ Removing deprecated middleware file 'middleware/db.js'.");
-  fs.rmSync(deprecatedConfigFilePath);
-  removeFolderIfEmpty(deprecatedConfigFolder);
-}
-
-/**
- *
- * @param persistToEnv
- * @returns {string}
+ * If “.git” (deprecated) config path exists (./middleware/db.js), migrate it into .env
+ * or else write MONGO default into .env.
  */
 function fetchMongoDBConnectionString(persistToEnv = false) {
+  // If MONGO_KEY is not set:
   if (!process.env[AppConstants.MONGO_KEY]) {
     logger.warning(
-      `~ ${AppConstants.MONGO_KEY} environment variable is not set. Assuming default: ${AppConstants.MONGO_KEY}=${AppConstants.defaultMongoStringUnauthenticated}`
+      `~ ${AppConstants.MONGO_KEY} not set. Assuming default: ${AppConstants.defaultMongoStringUnauthenticated}`
     );
-    printInstructionsURL();
+    printInstructionsURL(); // print docs link
     process.env[AppConstants.MONGO_KEY] = AppConstants.defaultMongoStringUnauthenticated;
 
-    // is not isDocker just to be sure, also checked in writeVariableToEnvFile
+    // If asked to persist and not in Docker, write to .env
     if (persistToEnv && !isDocker()) {
       envUtils.writeVariableToEnvFile(
         path.resolve(dotEnvPath),
@@ -153,68 +114,44 @@ function fetchMongoDBConnectionString(persistToEnv = false) {
 }
 
 /**
- *
- * @returns {string}
- */
-function fetchOctoFarmPort() {
-  let port = process.env[AppConstants.OCTOFARM_PORT_KEY];
-  if (Number.isNaN(parseInt(port))) {
-    logger.warning(
-      `~ The ${AppConstants.OCTOFARM_PORT_KEY} setting was not a correct port number: >= 0 and < 65536. Actual value: ${port}.`
-    );
-
-    // is not isDocker just to be sure, also checked in writeVariableToEnvFile
-    if (!isDocker()) {
-      envUtils.writeVariableToEnvFile(
-        path.resolve(dotEnvPath),
-        AppConstants.OCTOFARM_PORT_KEY,
-        AppConstants.defaultOctoFarmPort
-      );
-      logger.info(
-        `~ Written ${AppConstants.OCTOFARM_PORT_KEY}=${AppConstants.defaultOctoFarmPort} setting to .env file.`
-      );
-    }
-
-    // Update middleware immediately
-    process.env[AppConstants.OCTOFARM_PORT_KEY] = AppConstants.defaultOctoFarmPort.toString();
-    port = process.env[AppConstants.OCTOFARM_PORT_KEY];
-  }
-  return port;
-}
-/**
-/**
- * Make sure that we have a valid MongoDB connection string to work with.
+ * If MONGO_KEY isn’t in process.env, attempt migration from deprecated middleware/db.js,
+ * otherwise write default to .env.
  */
 function ensureMongoDBConnectionStringSet() {
-  let dbConnectionString = process.env[AppConstants.MONGO_KEY];
-  if (!dbConnectionString) {
+  let conn = process.env[AppConstants.MONGO_KEY];
+  const deprecatedConfigFolder = '../middleware/';
+  const deprecatedConfigFilePath = deprecatedConfigFolder + 'db.js';
+
+  if (!conn) {
+    // If in Docker, just fetch (entrypoint sees it)
     if (isDocker()) {
-      // This will not trigger often, as docker entrypoint catches this.
       fetchMongoDBConnectionString(false);
       return;
     }
 
+    // If no deprecated file, just write default into .env
     if (!fs.existsSync(deprecatedConfigFilePath)) {
       fetchMongoDBConnectionString(true);
       return;
     }
 
+    // Else, pull MongoURI from the deprecated file, if present
     const mongoFallbackURI = require(deprecatedConfigFilePath).MongoURI;
     if (!mongoFallbackURI) {
       logger.info(
-        "~ Found deprecated middleware file 'middleware/db.js', but the MongoURI variable was not set (or possibly invalid)."
+        `~ Found deprecated 'middleware/db.js', but no MongoURI inside it. Clearing it.`
       );
       removeDeprecatedMongoURIConfigFile();
       logger.info(
-        `~ ${AppConstants.MONGO_KEY} environment variable is not set. Assuming default: ${AppConstants.MONGO_KEY}=${AppConstants.defaultMongoStringUnauthenticated}`
+        `~ ${AppConstants.MONGO_KEY} not set. Using default: ${AppConstants.defaultMongoStringUnauthenticated}`
       );
       printInstructionsURL();
       process.env[AppConstants.MONGO_KEY] = AppConstants.defaultMongoStringUnauthenticated;
     } else {
-      // We're not in docker, so we have some patch-work to do.
+      // We have a fallback URI → migrate it into .env
       removeDeprecatedMongoURIConfigFile();
       logger.info(
-        "~ Found deprecated middleware file 'middleware/db.js', performing small migration task to '.env'."
+        `~ Migrated MongoURI from deprecated middleware to .env: ${mongoFallbackURI}`
       );
       envUtils.writeVariableToEnvFile(
         path.resolve(dotEnvPath),
@@ -224,52 +161,150 @@ function ensureMongoDBConnectionStringSet() {
       process.env[AppConstants.MONGO_KEY] = mongoFallbackURI;
     }
   } else {
+    // If MONGO_KEY was set and the deprecated file still exists, remove it
     if (fs.existsSync(deprecatedConfigFilePath)) {
       logger.info(
-        "~ Found deprecated middleware file 'middleware/db.js', but it is redundant. Clearing this up for you."
+        `~ Found deprecated middleware file '${deprecatedConfigFilePath}', but MONGO_KEY already set. Clearing it.`
       );
       removeDeprecatedMongoURIConfigFile();
     }
-    logger.info(`✓ ${AppConstants.MONGO_KEY} environment variable set!`);
+    logger.info(`✓ ${AppConstants.MONGO_KEY} is set!`);
   }
 }
 
 /**
- *
+ * Write instructions URL for new users
+ */
+function printInstructionsURL() {
+  const instructionsReferralURL =
+    'https://docs.octofarm.net/installation/setup-environment.html';
+  logger.info(
+    `Please read ${instructionsReferralURL} for environment‐configuration steps.`
+  );
+}
+
+/**
+ * Remove deprecated middleware/db.js and then delete the folder if empty.
+ */
+function removeDeprecatedMongoURIConfigFile() {
+  const deprecatedConfigFolder = '../middleware/';
+  const deprecatedConfigFilePath = deprecatedConfigFolder + 'db.js';
+
+  try {
+    logger.info(`~ Removing deprecated file ${deprecatedConfigFilePath}`);
+    fs.rmSync(deprecatedConfigFilePath);
+  } catch (err) {
+    logger.error(`~ Could not remove deprecated file: ${deprecatedConfigFilePath}`, err.toString());
+  }
+  removeFolderIfEmpty(deprecatedConfigFolder);
+}
+
+/**
+ * Attempt to rmdir a folder if empty (silent if not empty).
+ */
+function removeFolderIfEmpty(folder) {
+  fs.rmdir(folder, (err) => {
+    if (err) {
+      logger.error(`~ Could not clear up folder ${folder} (not empty)`);
+    } else {
+      logger.info(`✓ Removed empty folder ${folder}`);
+    }
+  });
+}
+
+/**
+ * If OCTOFARM_PORT is missing/invalid, write default to .env and set it.
+ */
+function fetchOctoFarmPort() {
+  let port = process.env[AppConstants.OCTOFARM_PORT_KEY];
+  if (Number.isNaN(parseInt(port))) {
+    logger.warning(
+      `~ ${AppConstants.OCTOFARM_PORT_KEY} is not a valid port (got: ${port}). Using default: ${AppConstants.defaultOctoFarmPort}`
+    );
+    if (!isDocker()) {
+      envUtils.writeVariableToEnvFile(
+        path.resolve(dotEnvPath),
+        AppConstants.OCTOFARM_PORT_KEY,
+        AppConstants.defaultOctoFarmPort
+      );
+      logger.info(
+        `~ Wrote ${AppConstants.OCTOFARM_PORT_KEY}=${AppConstants.defaultOctoFarmPort} to .env`
+      );
+    }
+    process.env[AppConstants.OCTOFARM_PORT_KEY] =
+      AppConstants.defaultOctoFarmPort.toString();
+    port = process.env[AppConstants.OCTOFARM_PORT_KEY];
+  }
+  return port;
+}
+
+/**
+ * Check if OCTOFARM_PORT exists; if not, set default in memory (no .env write).
  */
 function ensurePortSet() {
-  fetchOctoFarmPort();
-
   if (!process.env[AppConstants.OCTOFARM_PORT_KEY]) {
     logger.info(
-      `~ ${AppConstants.OCTOFARM_PORT_KEY} environment variable is not set. Assuming default: ${AppConstants.OCTOFARM_PORT_KEY}=${AppConstants.defaultOctoFarmPort}.`
+      `~ ${AppConstants.OCTOFARM_PORT_KEY} missing. Defaulting to ${AppConstants.defaultOctoFarmPort}`
     );
     printInstructionsURL();
-    process.env[AppConstants.OCTOFARM_PORT_KEY] = AppConstants.defaultOctoFarmPort.toString();
+    process.env[AppConstants.OCTOFARM_PORT_KEY] =
+      AppConstants.defaultOctoFarmPort.toString();
   }
 }
 
 /**
- *
+ * If LOG_LEVEL not set or invalid, default it to AppConstants.defaultLogLevel.
  */
 function ensureLogLevelSet() {
   const logLevel = process.env[AppConstants.LOG_LEVEL];
-
   if (!logLevel || !AppConstants.knownLogLevels.includes(logLevel)) {
     logger.info(
-      `~ ${AppConstants.LOG_LEVEL} environment variable is not set. Assuming default: ${AppConstants.LOG_LEVEL}=${AppConstants.defaultLogLevel}.`
+      `~ ${AppConstants.LOG_LEVEL} not set or invalid. Defaulting to ${AppConstants.defaultLogLevel}`
     );
     process.env[AppConstants.LOG_LEVEL] = AppConstants.defaultLogLevel.toString();
   }
 }
 
 /**
- * Parse and consume the .env file. Validate everything before starting OctoFarm.
- * Later this will switch to parsing a `middleware.yaml` file.
+ * Before everything else, verify that package.json has “name”: "octofarm-server"
+ * and that you’re running it in the proper folder. If not, abort.
+ */
+function setupPackageJsonVersionOrThrow() {
+  const result = envUtils.verifyPackageJsonRequirements(path.join(__dirname, '../server'));
+  if (!result) {
+    if (envUtils.isPm2()) {
+      removePm2Service('Package.json validation failed.');
+    }
+    throw new Error('Aborting OctoFarm server.');
+  }
+}
+
+/**
+ * Remove the PM2 service if OctoFarm fails to start.
+ */
+function removePm2Service(reason) {
+  logger.error('Aborting and removing PM2 service because: ' + reason);
+  try {
+    execSync('pm2 delete octofarm');
+  } catch (e) {
+    // ignore if pm2 delete fails
+  }
+}
+
+/**
+ * If there’s a package.json in “server/” and the “name” field is wrong, abort.
+ */
+function verifyPackageJsonRequirements(rootPath) {
+  return envUtils.verifyPackageJsonRequirements(rootPath);
+}
+
+/**
+ * The master setup routine for reading/parsing .env (unless skipDotEnv = true),
+ * then validating/fixing all required environment variables.
  */
 function setupEnvConfig(skipDotEnv = false) {
   if (!skipDotEnv) {
-    // This needs to be CWD of app.js, so be careful not to move this call.
+    // We must run this from the CWD of app.js
     dotenv.config({ path: dotEnvPath });
     logger.info('✓ Parsed environment and (optional) .env file');
   }
@@ -286,41 +321,37 @@ function setupEnvConfig(skipDotEnv = false) {
 }
 
 /**
- *
- * @returns {string}
+ * Checks for a valid “templates” folder under /server.
+ * If missing, error out (different messaging depending on Docker / PM2 / /“pkg”).
  */
 function getViewsPath() {
-  logger.debug('Running in directory:', { dirname: __dirname });
   const viewsPath = path.join(__dirname, 'templates');
   if (!fs.existsSync(viewsPath)) {
     if (isDocker()) {
       throw new Error(
-        `Could not find views folder at ${viewsPath} within this docker container. Please report this as a bug to the developers.`
+        `Views folder not found at ${viewsPath} inside the Docker container.`
       );
     } else if (envUtils.isPm2()) {
       removePm2Service(
-        `Could not find views folder at ${viewsPath} within the folder being run by Pm2. Please check your path or repository.`
+        `Views folder not found at ${viewsPath} when run under PM2. Double‐check your path.`
       );
     } else if (envUtils.isNodemon()) {
       throw new Error(
-        `Could not find views folder at ${viewsPath} within the folder being run by Nodemon. Please check your path or repository.`
+        `Views folder not found at ${viewsPath} when run under Nodemon. Double‐check your path.`
       );
     } else {
       throw new Error(
-        `Could not find views folder at ${viewsPath} within the OctoFarm path or binary PKG. Please report this as a bug to the developers.`
+        `Views folder not found at ${viewsPath}.`
       );
     }
   } else {
-    logger.debug('✓ Views folder found:', { path: viewsPath });
+    logger.debug('✓ Views folder found at:', { path: viewsPath });
   }
   return viewsPath;
 }
 
 /**
- * Checks and runs database migrations
- * @param db
- * @param client
- * @returns {Promise<void>}
+ * Run any pending migrate-mongo migrations before starting the server.
  */
 async function runMigrations(db, client) {
   const migrationsStatus = await status(db);
@@ -328,21 +359,25 @@ async function runMigrations(db, client) {
 
   if (pendingMigrations.length) {
     logger.info(
-      `! MongoDB has ${pendingMigrations.length} migrations left to run (${migrationsStatus.length} are already applied)`
+      `! MongoDB has ${pendingMigrations.length} migrations left to run.`
     );
   } else {
-    logger.info(`✓ Mongo Database is up to date [${migrationsStatus.length} migration applied]`);
+    logger.info(
+      `✓ MongoDB is up to date (${migrationsStatus.length} applied).`
+    );
   }
 
   const migrationResult = await up(db, client);
-
-  if (migrationResult > 0) {
-    logger.info(`Applied ${migrationResult.length} migrations successfully`, migrationResult);
+  if (migrationResult.length > 0) {
+    logger.info(
+      `Applied ${migrationResult.length} migrations successfully:`,
+      migrationResult
+    );
   }
 }
 
 /**
- * Ensures we have a page title set
+ * Ensure page title is always defined (fallback to default).
  */
 function ensurePageTitle() {
   if (!process.env[AppConstants.OCTOFARM_SITE_TITLE_KEY]) {
@@ -352,51 +387,311 @@ function ensurePageTitle() {
 }
 
 /**
- *
- * @returns {boolean} Is Production Environment
+ * Helper: is production environment?
  */
 function isEnvProd() {
-  return process.env[AppConstants.NODE_ENV_KEY] === AppConstants.defaultProductionEnv;
+  return (
+    process.env[AppConstants.NODE_ENV_KEY] ===
+    AppConstants.defaultProductionEnv
+  );
 }
 
 /**
- *
- * @returns {string} Client version number #.#.#
+ * Return the version of the client (from package-lock.json).
  */
 function fetchClientVersion() {
-  if (!currentClientVersion) {
-    currentClientVersion =
-      packageLockFile?.dependencies['@notexpectedyet/octofarm-client']?.version || 'unknown';
-    if (currentClientVersion === 'unknown') {
-      logger.error('Unable to parse package-lock file... please check installation!');
-    }
+  let version = packageLockFile?.dependencies[
+    '@notexpectedyet/octofarm-client'
+  ]?.version;
+  if (!version) {
+    version = 'unknown';
+    logger.error(
+      'Unable to parse @notexpectedyet/octofarm-client version from package-lock.json'
+    );
   }
-  return currentClientVersion;
+  return version;
 }
 
+/**
+ * Return (and in .env, create if missing) the SUPER_SECRET_KEY.
+ */
 function fetchSuperSecretKey() {
   return process.env[AppConstants.SUPER_SECRET_KEY];
 }
 
+/**
+ * If SUPER_SECRET_KEY missing, generate a default one, write to .env, and set it.
+ */
 function ensureSuperSecretKeySet() {
-  const newlyGeneratedKey = AppConstants.defaultSuperSecretKey;
-
+  const defaultKey = AppConstants.defaultSuperSecretKey;
   if (!process.env[AppConstants.SUPER_SECRET_KEY]) {
     logger.info(
-      `~ ${AppConstants.SUPER_SECRET_KEY} environment variable is not set. Setting new randomly generated Key!: ${AppConstants.SUPER_SECRET_KEY}=${newlyGeneratedKey}.`
+      `~ ${AppConstants.SUPER_SECRET_KEY} not set. Generating a new one: ${defaultKey}`
     );
     envUtils.writeVariableToEnvFile(
       path.resolve(dotEnvPath),
       AppConstants.SUPER_SECRET_KEY,
-      newlyGeneratedKey
+      defaultKey
     );
-    process.env[AppConstants.SUPER_SECRET_KEY] = newlyGeneratedKey.toString();
+    process.env[AppConstants.SUPER_SECRET_KEY] = defaultKey.toString();
   } else {
-    logger.info(`✓ ${AppConstants.SUPER_SECRET_KEY} environment variable set!`);
+    logger.info(`✓ ${AppConstants.SUPER_SECRET_KEY} is set.`);
   }
 }
 
+// -----------------------------------------------------------------------------------------------------
+// 2) EXPRESS‐RELATED FUNCTIONS (pulled from your “full code” snippet)
+//    These four must be exported so that app-core.js / app.js can call them:
+//      • setupExpressServer()
+//      • ensureSystemSettingsInitiated()
+//      • serveOctoFarmRoutes(app)
+//      • serveOctoFarmNormally(app, quick_boot = false)
+// -----------------------------------------------------------------------------------------------------
+
+// Import everything Express needs:
+const express = require('express');
+const flash = require('connect-flash');
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
+const cookieParser = require('cookie-parser');
+const helmet = require('helmet');
+const { octofarmGlobalLimits, printerActionLimits } = require('./middleware/rate-limiting');
+const morganMiddleware = require('./middleware/morgan');
+const passport = require('passport');
+const ServerSettingsDB = require('./models/ServerSettings');
+const expressLayouts = require('express-ejs-layouts');
+const LoggerCore = require('./handlers/logger.js');
+const { OctoFarmTasks } = require('./tasks');
+const { optionalInfluxDatabaseSetup } = require('./services/influx-export.service.js');
+const { getViewsPath: _getViewsPath } = require('./app-env'); // note: re-use getViewsPath above
+const { SettingsClean } = require('./services/settings-cleaner.service');
+const { TaskManager } = require('./services/task-manager.service');
+const exceptionHandler = require('./exceptions/exception.handler');
+const { fetchSuperSecretKey: _fetchSuperSecretKey } = require('./app-env');
+const { sanitizeString } = require('./utils/sanitize-utils');
+const { ensureClientServerVersion } = require('./middleware/client-server-version');
+const { LOGGER_ROUTE_KEYS: LOGGER_KEYS } = require('./constants/logger.constants');
+const { ensureAuthenticated } = require('./middleware/auth');
+const { validateParamsMiddleware } = require('./middleware/validators');
+const { proxyOctoPrintClientRequests } = require('./middleware/octoprint-proxy');
+const rateLimit = require('express-rate-limit');
+const M_VALID = require('./constants/validate-mongo.constants');
+
+// Create a separate logger instance for the “core” server logic
+const loggerCore = new LoggerCore(LOGGER_KEYS.SERVER_CORE);
+
+// Rate limiter for login route (e.g. max 10 attempts/minute)
+const authLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 10, // limit each IP to 10 login attempts per windowMs
+  message:
+    'Too many login attempts from this IP, please try again after a minute',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * Builds and returns a brand-new Express “app” instance:
+ *   • sets up global rate limits, sanitization, Passport hooks, Morgan, Helmet, etc.
+ *   • configures view engine (EJS), static folders (views, /images, /assets, etc.)
+ *   • mounts cookieParser, express.urlencoded, session+MongoStore, flash, Passport
+ */
+function setupExpressServer() {
+  const app = express();
+
+  // Global rate limits & sanitization
+  app.use(octofarmGlobalLimits);
+  app.use(require('sanitize').middleware);
+
+  // Passport initial configuration
+  require('./middleware/passport.js')(passport);
+
+  // Morgan (HTTP request logging) middleware
+  app.use(morganMiddleware);
+
+  // Helmet (security headers)
+  app.use(helmet.dnsPrefetchControl());
+  app.use(helmet.expectCt());
+  app.use(helmet.hidePoweredBy());
+  app.use(helmet.hsts());
+  app.use(helmet.ieNoOpen());
+  app.use(helmet.noSniff());
+  app.use(helmet.originAgentCluster());
+  app.use(helmet.permittedCrossDomainPolicies());
+  app.use(helmet.referrerPolicy());
+  app.use(helmet.xssFilter());
+
+  // JSON body parsing
+  app.use(express.json());
+
+  // EJS / Express-Layouts setup
+  const viewsPath = _getViewsPath(); // from getViewsPath() above
+  app.set('views', viewsPath);
+  app.set('view engine', 'ejs');
+  app.use(expressLayouts);
+  app.use(express.static(viewsPath));
+
+  // Serve the React/Vite/whatever client assets folder, if present:
+  const clientBase = path.join(__dirname, '../client/assets');
+  app.use('/assets', express.static(clientBase));
+  app.use('/css', express.static(path.join(clientBase, 'css')));
+  app.use('/js', express.static(path.join(clientBase, 'js')));
+
+  // Static “/images” served from project root /images
+  app.use('/images', express.static(path.join(__dirname, '../images')));
+
+  // Cookie parsing & URL-encoded body parser
+  app.use(cookieParser());
+  app.use(express.urlencoded({ extended: false, limit: '2mb' }));
+
+  // Express-Session using connect-mongo:
+  app.use(
+    session({
+      secret: _fetchSuperSecretKey(),
+      resave: false,
+      saveUninitialized: true,
+      store: MongoStore.create({
+        mongoUrl: process.env[AppConstants.MONGO_KEY],
+        ttl: 14 * 24 * 60 * 60, // 14 days
+        autoRemove: 'native',
+      }),
+    })
+  );
+  app.use(passport.initialize());
+  app.use(passport.session());
+  app.use(passport.authenticate('remember-me'));
+
+  // Flash messages
+  app.use(flash());
+  app.use((req, res, next) => {
+    res.locals.success_msg = req.flash('success_msg');
+    res.locals.error_msg = req.flash('error_msg');
+    res.locals.error = req.flash('error');
+    next();
+  });
+
+  return app;
+}
+
+/**
+ * Before starting any HTTP routes, check that our “ServerSettings” collection/table
+ * exists in MongoDB. If it fails (authentication error or cannot connect),
+ * throw an error to abort startup.
+ */
+async function ensureSystemSettingsInitiated() {
+  loggerCore.info('Checking server‐settings collection in MongoDB...');
+  await ServerSettingsDB.find({}).catch((e) => {
+    if (e.message.includes('command find requires authentication')) {
+      throw new Error('Database authentication failed.');
+    } else {
+      throw new Error('Database connection failed.');
+    }
+  });
+  // Once DB is connected, run any startup “cleanup” for settings
+  return SettingsClean.initialise();
+}
+
+/**
+ * Mount all of your OctoFarm routes onto the Express “app”:
+ *   • health-check, /camera proxy, /octoprint proxy, /users, /printers, /settings, /filament, /history, /scripts, /input, /client, SSE events, etc.
+ *   • ANY unmatched “*.min.js” request should return 404 + “Resource not found”
+ *   • Otherwise redirect to “/” (so the React client can handle routing)
+ *   • Finally use the global exception handler
+ */
+function serveOctoFarmRoutes(app) {
+  app.use(ensureClientServerVersion);
+
+  app.use('/', require('./routes/index', { page: 'route' }));
+  app.use(
+    '/camera',
+    ensureAuthenticated,
+    require('./routes/camera-proxy.routes.js', { page: 'route' })
+  );
+  app.use(
+    '/octoprint/:id/:item(*)',
+    ensureAuthenticated,
+    validateParamsMiddleware(M_VALID.MONGO_ID),
+    proxyOctoPrintClientRequests
+  );
+  app.use('/users', require('./routes/users.routes.js', { page: 'route' }));
+  app.use(
+    '/printers',
+    printerActionLimits,
+    require('./routes/printer-manager.routes.js', { page: 'route' })
+  );
+  app.use(
+    '/settings',
+    ensureAuthenticated,
+    require('./routes/system-settings.routes.js', { page: 'route' })
+  );
+  app.use('/filament', require('./routes/filament-manager.routes.js', { page: 'route' }));
+  app.use('/history', require('./routes/history.routes.js', { page: 'route' }));
+  app.use(
+    '/scripts',
+    require('./routes/local-scripts-manager.routes.js', { page: 'route' })
+  );
+  app.use(
+    '/input',
+    require('./routes/external-data-collection.routes.js', { page: 'route' })
+  );
+  app.use('/client', require('./routes/printer-sorting.routes.js', { page: 'route' }));
+  app.use(
+    '/printersInfo',
+    require('./routes/sse.printer-manager.routes.js', { page: 'route' })
+  );
+  app.use(
+    '/dashboardInfo',
+    require('./routes/sse.dashboard.routes.js', { page: 'route' })
+  );
+  app.use(
+    '/monitoringInfo',
+    require('./routes/sse.printer-monitoring.routes.js', { page: 'route' })
+  );
+  app.use('/events', require('./routes/sse.events.routes.js', { page: 'route' }));
+
+  app.get('*', function (req, res) {
+    const originalURL = sanitizeString(req.originalUrl);
+    if (originalURL.endsWith('.min.js')) {
+      res.status(404).send('Resource not found: ' + originalURL);
+      return;
+    }
+    res.redirect('/');
+  });
+
+  app.use(exceptionHandler);
+}
+
+/**
+ * After the routes are mounted, start all scheduled jobs (system startup tasks,
+ * printer initialization, recurring tasks). Then attempt Influx setup (optional).
+ * Finally return the same “app” so that app.js can call app.listen(...) on it.
+ */
+async function serveOctoFarmNormally(app, quick_boot = false) {
+  if (!quick_boot) {
+    loggerCore.info('Registering OctoFarm startup tasks and recurring jobs...');
+    TaskManager.registerJobOrTask(OctoFarmTasks.SYSTEM_STARTUP_TASKS);
+    TaskManager.registerJobOrTask(OctoFarmTasks.PRINTER_INITIALISE_TASK);
+    for (let task of OctoFarmTasks.RECURRING_BOOT_TASKS) {
+      TaskManager.registerJobOrTask(task);
+    }
+    try {
+      await optionalInfluxDatabaseSetup();
+    } catch (e) {
+      loggerCore.error("Couldn't set up InfluxDB:", e.toString());
+    }
+  }
+
+  serveOctoFarmRoutes(app);
+  return app;
+}
+
+// -----------------------------------------------------------------------------------------------------
+// 3) MODULE EXPORTS
+//    Export both “environment” functions and “express” functions so that
+//    app-core.js / app.js can import them.
+// -----------------------------------------------------------------------------------------------------
 module.exports = {
+  // Environment/configuration exports:
   isEnvProd,
   setupEnvConfig,
   runMigrations,
@@ -405,4 +700,10 @@ module.exports = {
   getViewsPath,
   fetchClientVersion,
   fetchSuperSecretKey,
+
+  // Express‐related exports (so app-core.js can do: const { setupExpressServer, … } = require('./app-env')):
+  setupExpressServer,
+  ensureSystemSettingsInitiated,
+  serveOctoFarmRoutes,
+  serveOctoFarmNormally,
 };
