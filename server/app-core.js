@@ -1,227 +1,77 @@
+// server/app.js
+
+require('dotenv').config(); // if you are using a .env file
+const mongoose = require('mongoose');
+const http = require('http');
 const path = require('path');
-const express = require('express');
-const flash = require('connect-flash');
-const session = require('express-session');
-const MongoStore = require('connect-mongo');
-const cookieParser = require('cookie-parser');
-const helmet = require('helmet');
-const { octofarmGlobalLimits, printerActionLimits } = require('./middleware/rate-limiting');
-const morganMiddleware = require('./middleware/morgan');
-const passport = require('passport');
-const ServerSettingsDB = require('./models/ServerSettings');
-const expressLayouts = require('express-ejs-layouts');
-const Logger = require('./handlers/logger.js');
-const { OctoFarmTasks } = require('./tasks');
-const { optionalInfluxDatabaseSetup } = require('./services/influx-export.service.js');
-const { getViewsPath } = require('./app-env');
-const { SettingsClean } = require('./services/settings-cleaner.service');
-const { TaskManager } = require('./services/task-manager.service');
-const exceptionHandler = require('./exceptions/exception.handler');
-const { AppConstants } = require('./constants/app.constants');
-const { fetchSuperSecretKey } = require('./app-env');
-const { sanitizeString } = require('./utils/sanitize-utils');
-const { ensureClientServerVersion } = require('./middleware/client-server-version');
-const { LOGGER_ROUTE_KEYS } = require('./constants/logger.constants');
-const { ensureAuthenticated } = require('./middleware/auth');
-const { validateParamsMiddleware } = require('./middleware/validators');
-const { proxyOctoPrintClientRequests } = require('./middleware/octoprint-proxy');
-const rateLimit = require('express-rate-limit');
+const fs = require('fs');
 
-const M_VALID = require('./constants/validate-mongo.constants');
-
-const logger = new Logger(LOGGER_ROUTE_KEYS.SERVER_CORE);
-
-// Define a limiter — e.g. max 10 attempts per 1 minutes per IP
-const authLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,   // 15 minutes
-  max: 10,                     // limit each IP to 5 requests per windowMs
-  message:
-    'Too many login attempts from this IP, please try again after 15 minutes',
-  standardHeaders: true,      // Return rate limit info in `RateLimit-*` headers
-  legacyHeaders: false,       // Disable the `X-RateLimit-*` headers
-});
-
-// Apply limiter to your login route
-app.post('/users/login', authLimiter, passport.authenticate('local', {
-  successRedirect: '/',
-  failureRedirect: '/users/login',
-  failureFlash: true
-}));
-
-/**
- *
- * @returns {*|Express}
- */
-function setupExpressServer() {
-  const app = express();
-
-  app.use(octofarmGlobalLimits);
-  app.use(require('sanitize').middleware);
-  require('./middleware/passport.js')(passport);
-
-  //Morgan middleware
-  app.use(morganMiddleware);
-
-  // Helmet middleware. Anymore and would require customising by the user...
-  app.use(helmet.dnsPrefetchControl());
-  app.use(helmet.expectCt());
-  app.use(helmet.hidePoweredBy());
-  app.use(helmet.hsts());
-  app.use(helmet.ieNoOpen());
-  app.use(helmet.noSniff());
-  app.use(helmet.originAgentCluster());
-  app.use(helmet.permittedCrossDomainPolicies());
-  app.use(helmet.referrerPolicy());
-  app.use(helmet.xssFilter());
-  app.use('/settings', authLimiter, ensureAuthenticated, settingsRouter);
-  app.use(express.json());
-
-  const viewsPath = getViewsPath();
-
-  app.set('views', viewsPath);
-  app.set('view engine', 'ejs');
-  app.use(expressLayouts);
-  app.use(express.static(viewsPath));
-
-   // Serve everything in client/ under the /assets URL:
-  const clientBase = path.join(__dirname, '../client/assets');
-  app.use('/assets', express.static(clientBase));
-  app.use('/css',    express.static(path.join(clientBase, 'css')));
-  app.use('/js',     express.static(path.join(clientBase, 'js')));
-
-  // Continue with images, cookies, sessions…
-  app.use('/images', express.static(path.join(__dirname, '../images')));
-  app.use(cookieParser());
-  app.use(express.urlencoded({ extended: false, limit: '2mb' }));
-  app.use(
-    session({
-      secret: fetchSuperSecretKey(),
-      resave: false,
-      saveUninitialized: true,
-      store: new MongoStore({
-        mongoUrl: process.env[AppConstants.MONGO_KEY],
-        ttl: 14 * 24 * 60 * 60,
-        autoRemove: 'native',
-      }),
-    })
-  );
-  app.use(passport.initialize());
-  app.use(passport.session());
-  app.use(passport.authenticate('remember-me')); // Remember Me!
-
-  app.use(flash());
-  app.use((req, res, next) => {
-    res.locals.success_msg = req.flash('success_msg');
-    res.locals.error_msg = req.flash('error_msg');
-    res.locals.error = req.flash('error');
-    next();
-  });
-
-  return app;
-}
-
-/**
- *
- * @returns {Promise<void>}
- */
-async function ensureSystemSettingsInitiated() {
-  logger.info('Checking Server Settings...');
-  await ServerSettingsDB.find({}).catch((e) => {
-    if (e.message.includes('command find requires authentication')) {
-      throw new Error('Database authentication failed.');
-    } else {
-      throw new Error('Database connection failed.');
-    }
-  });
-
-  // Setup Settings as connection is established
-  return SettingsClean.initialise();
-}
-
-/**
- *
- * @param app
- */
-function serveOctoFarmRoutes(app) {
-  app.use(ensureClientServerVersion);
-
-  app.use('/', require('./routes/index', { page: 'route' }));
-  app.use(
-    '/camera',
-    ensureAuthenticated,
-    require('./routes/camera-proxy.routes.js', { page: 'route' })
-  );
-  app.use(
-    '/octoprint/:id/:item(*)',
-    ensureAuthenticated,
-    validateParamsMiddleware(M_VALID.MONGO_ID),
-    proxyOctoPrintClientRequests
-  );
-  app.use('/users', require('./routes/users.routes.js', { page: 'route' }));
-  app.use(
-    '/printers',
-    printerActionLimits,
-    require('./routes/printer-manager.routes.js', { page: 'route' })
-  );
-  app.use('/settings', require('./routes/system-settings.routes.js', { page: 'route' }));
-  app.use('/filament', require('./routes/filament-manager.routes.js', { page: 'route' }));
-  app.use('/history', require('./routes/history.routes.js', { page: 'route' }));
-  app.use('/scripts', require('./routes/local-scripts-manager.routes.js', { page: 'route' }));
-  app.use('/input', require('./routes/external-data-collection.routes.js', { page: 'route' }));
-  app.use('/client', require('./routes/printer-sorting.routes.js', { page: 'route' }));
-  app.use('/printersInfo', require('./routes/sse.printer-manager.routes.js', { page: 'route' })); // DEPRECATE IN FAVOR OF EVENTS, WILL TAKE SOME WORK
-  app.use('/dashboardInfo', require('./routes/sse.dashboard.routes.js', { page: 'route' })); // DEPRECATE IN FAVOR OF EVENTS, WILL TAKE SOME WORK - This may as well be an API call
-  app.use(
-    '/monitoringInfo',
-    require('./routes/sse.printer-monitoring.routes.js', { page: 'route' })
-  ); // DEPRECATE IN FAVOR OF EVENTS, WILL TAKE SOME WORK
-  app.use('/events', require('./routes/sse.events.routes.js', { page: 'route' }));
-
-  app.get('*', function (req, res) {
-    const originalURL = sanitizeString(req.originalUrl);
-    if (originalURL.endsWith('.min.js')) {
-      res.status(404);
-      res.send('Resource not found ' + originalURL);
-      return;
-    }
-    res.redirect('/');
-  });
-
-  app.use(exceptionHandler);
-}
-
-/**
- *
- * @param app
- * @param quick_boot
- * @returns {Promise<any>}
- */
-async function serveOctoFarmNormally(app, quick_boot = false) {
-  if (!quick_boot) {
-    logger.info('Starting OctoFarm server tasks...');
-
-    TaskManager.registerJobOrTask(OctoFarmTasks.SYSTEM_STARTUP_TASKS);
-
-    TaskManager.registerJobOrTask(OctoFarmTasks.PRINTER_INITIALISE_TASK);
-
-    for (let task of OctoFarmTasks.RECURRING_BOOT_TASKS) {
-      TaskManager.registerJobOrTask(task);
-    }
-    try {
-      await optionalInfluxDatabaseSetup();
-    } catch (e) {
-      logger.error("Couldn't setup influx database connection...", e.toString());
-    }
-  }
-
-  serveOctoFarmRoutes(app);
-
-  return app;
-}
-
-module.exports = {
+// 1) Import the four methods from your "core" file (the code you just posted).
+//    I’m assuming you saved that file as `server/app-core.js`.
+const {
   setupExpressServer,
   ensureSystemSettingsInitiated,
   serveOctoFarmRoutes,
-  serveOctoFarmNormally,
-};
+  serveOctoFarmNormally
+} = require('./app-core');
+
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Before anything else, make sure your `logs/` and `images/` directories exist
+// and are writable. Winston in logger.js expects to write into `logs/…`,
+// and your background‐image utility expects to write into `images/…`.
+//
+// From /OctoFarm (your project root) run once in the shell:
+//      mkdir -p logs images
+//      sudo chown -R $(whoami):$(whoami) logs images
+// If you already did that, you can skip this step.
+// ────────────────────────────────────────────────────────────────────────────────
+
+
+// 2) Connect to MongoDB. (Adjust the connection string or options as needed.)
+const MONGO_URL = process.env.MONGO || 'mongodb://localhost:27017/octofarm';
+mongoose
+  .connect(MONGO_URL, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+  })
+  .then(() => {
+    console.log('✅ Connected to MongoDB');
+  })
+  .catch((err) => {
+    console.error('❌ Could not connect to MongoDB:', err);
+    process.exit(1);
+  });
+
+// 3) Call setupExpressServer() to get a fully‐configured Express `app`.
+const app = setupExpressServer();
+
+// 4) At startup, ensure your “system settings” are in place.
+//    If this throws, we exit the process. Otherwise, we continue.
+//    (You probably want to catch any errors and exit gracefully.)
+ensureSystemSettingsInitiated()
+  .then(async () => {
+    console.log('✅ System settings loaded.');
+
+    // 5) Unless you passed a "quick_boot" flag, we now register jobs, Influx setup, etc.
+    //    `serveOctoFarmNormally(app)` itself _will_ call `serveOctoFarmRoutes(app)` internally,
+    //    so you do not need to call `serveOctoFarmRoutes` again here.
+    //
+    //    If you want to skip recurring tasks on every restart, you can pass `true` as the
+    //    second argument (quick_boot=true). Otherwise, pass nothing or `false`.
+    await serveOctoFarmNormally(app, /* quick_boot = */ false);
+
+    // 6) At this point the Express routes are registered and your background tasks are queued.
+    //    Start the HTTP server:
+    const PORT = parseInt(process.env.PORT || '4000', 10);
+    app.server = http.createServer(app);
+
+    app.server.listen(PORT, () => {
+      console.log(`🚀 OctoFarm server listening on port ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('❌ Failed to initialize system settings:', err);
+    process.exit(1);
+  });
+
