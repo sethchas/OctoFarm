@@ -3,15 +3,16 @@
 const path = require("path");
 const fs = require("fs");
 const dotenv = require("dotenv");
-const isDocker = require("is-docker"); // note: `require("is-docker")` returns a boolean
+const isDocker = require("is-docker"); // note: isDocker is a function
 const Logger = require("../handlers/logger.js");
 const { LOGGER_ROUTE_KEYS } = require("../constants/logger.constants");
 
-// We pass `false` as the second argument so that logger doesn’t try to write to a “logs/” folder before we create it.
+// We pass `false` so that this logger doesn’t try to write into a logs/ folder
+// before we create it.  (It will still print to the console.)
 const logger = new Logger(LOGGER_ROUTE_KEYS.UTILS_ENV_LOGGER, false);
 
 /**
- * Returns true if the process is running under PM2.
+ * Returns true if PM2 is running this process.
  */
 function isPm2() {
   return (
@@ -32,7 +33,7 @@ function isNodemon() {
 }
 
 /**
- * Returns true if NODE was explicitly invoked (rare).
+ * Returns true if someone explicitly set NODE in env (rare).
  */
 function isNode() {
   return "NODE" in process.env;
@@ -53,48 +54,43 @@ function stringifyDotEnv(obj) {
 }
 
 /**
- * Write (or update) a single key=value pair in the given .env file.
+ * Write or update one key=value pair in the given .env file (absolute path).
  *
- * - absoluteEnvPath must be an absolute path to the .env file (e.g. /OctoFarm/.env).
- * - variableKey is the environment‐variable name (e.g. "SUPER_SECRET_KEY").
- * - variableValue is the new value (string, number, etc).
- *
- * In Docker containers we do not persist .env changes, so if isDocker is true we simply bail out.
+ * If we detect we’re in Docker, bail out early (we don’t persist .env inside containers).
  */
 function writeVariableToEnvFile(absoluteEnvPath, variableKey, variableValue) {
-  if (isDocker) {
+  if (isDocker()) {
     logger.error("Tried to persist setting to .env in Docker mode. Skipping.");
     return;
   }
 
-  // Load the current .env (if missing, dotenv.config() will set .parsed to {} and .error.code === "ENOENT")
-  const current = dotenv.config({ path: absoluteEnvPath });
-  if (current.error && current.error.code !== "ENOENT") {
-    logger.error("Could not parse existing .env file:", current.error);
+  // Load whatever is already in .env (if missing, parsed will be {}, error.code==="ENOENT")
+  const loaded = dotenv.config({ path: absoluteEnvPath });
+  if (loaded.error && loaded.error.code !== "ENOENT") {
+    logger.error("Could not parse existing .env file:", loaded.error);
     throw new Error(
-      "Failed to parse .env file. Make sure it uses KEY=VALUE lines only."
+      "Failed to parse .env file. Make sure it only contains KEY=VALUE lines."
     );
   }
-  if (current.error && current.error.code === "ENOENT") {
+  if (loaded.error && loaded.error.code === "ENOENT") {
     logger.warning("Creating .env file because it did not exist:", absoluteEnvPath);
   }
 
-  // Merge existing parsed values (if any) with the new one:
+  // Merge the old values with the new one
   const newEnvObject = {
-    ...((current.parsed && typeof current.parsed === "object") ? current.parsed : {}),
+    ...((loaded.parsed && typeof loaded.parsed === "object") ? loaded.parsed : {}),
     [variableKey]: variableValue,
   };
 
-  // Serialize back to text:
+  // Serialize back to text and overwrite
   const newEnvText = stringifyDotEnv(newEnvObject);
   fs.writeFileSync(absoluteEnvPath, newEnvText);
   logger.info(`✓ Wrote ${variableKey} to ${absoluteEnvPath}`);
 }
 
 /**
- * Verify that package.json exists at project root and has name === "octofarm-server".
- *
- * Returns true if everything checks out, or false (and logs errors) if not.
+ * Verify that package.json exists at project root (rootPath) and has name=== "octofarm-server".
+ * Returns true if OK, false (and logs errors) otherwise.
  */
 function verifyPackageJsonRequirements(rootPath) {
   try {
@@ -123,20 +119,18 @@ function verifyPackageJsonRequirements(rootPath) {
 }
 
 /**
- * Ensure that an /images folder exists under the project root,
- * and that a "bg.jpg" is present. If missing, copy over the default.
+ * Ensure that <rootPath>/images exists and that a bg.jpg is present.
+ * If missing, copy the default from server/utils/bg_default.jpg.
  *
- * - rootPath should be the absolute path to your project’s root directory (e.g. "/OctoFarm").
- *
- * This no longer tries to create “../images” relative to the running directory;
- * instead it always uses the project root in order to avoid EACCES when PM2 is launched.
+ * - rootPath should be your project’s absolute root (e.g. "/OctoFarm").
+ *   You typically calculate this in app-env.js via `path.resolve(__dirname, "..")`.
  */
 function ensureBackgroundImageExists(rootPath) {
-  // 1) Target directory for runtime images:
+  // 1) Where we want <rootPath>/images
   const targetBgDir = path.join(rootPath, "images");
   const targetBgPath = path.join(targetBgDir, "bg.jpg");
 
-  // 2) If /images folder does not exist yet, create it:
+  // 2) If /images doesn’t exist, create it:
   if (!fs.existsSync(targetBgDir)) {
     try {
       fs.mkdirSync(targetBgDir, { recursive: true });
@@ -147,21 +141,20 @@ function ensureBackgroundImageExists(rootPath) {
     }
   }
 
-  // 3) If bg.jpg is already present, we’re done:
+  // 3) If bg.jpg already exists, we’re done:
   if (fs.existsSync(targetBgPath)) {
     logger.debug("✓ Background image already exists:", targetBgPath);
     return;
   }
 
-  // 4) Otherwise, attempt to copy the default from server/utils/bg_default.jpg
-  //    We assume bg_default.jpg sits in <root>/server/utils/bg_default.jpg
-  const defaultBgPath = path.join(rootPath, "server", "utils", "bg_default.jpg");
+  // 4) Otherwise, copy the default.  (bg_default.jpg is in server/utils alongside this file.)
+  const defaultBgPath = path.join(__dirname, "bg_default.jpg");
   if (!fs.existsSync(defaultBgPath)) {
     logger.error("✗ Cannot find default background at:", defaultBgPath);
     return;
   }
 
-  // 5) Copy default → <root>/images/bg.jpg
+  // 5) Copy default → <rootPath>/images/bg.jpg
   try {
     const buffer = fs.readFileSync(defaultBgPath);
     fs.writeFileSync(targetBgPath, buffer);
