@@ -3,7 +3,7 @@
 /**
  * This file handles:
  *   1) all environment/configuration setup (NODE_ENV, .env parsing, Mongo URI, port, migrations, etc.)
- *   2) exporting four Express-related functions that app-core.js/app.js will call:
+ *   2) exporting four Express-related functions that app-core.js expects:
  *        • setupExpressServer()
  *        • ensureSystemSettingsInitiated()
  *        • serveOctoFarmRoutes(app)
@@ -687,11 +687,9 @@ async function serveOctoFarmNormally(app, quick_boot = false) {
 
 // -----------------------------------------------------------------------------------------------------
 // 3) MODULE EXPORTS
-//    Export both “environment” functions and “express” functions so that
-//    app-core.js / app.js can import them.
 // -----------------------------------------------------------------------------------------------------
 module.exports = {
-  // Environment/configuration exports:
+  // Environment/config exports:
   isEnvProd,
   setupEnvConfig,
   runMigrations,
@@ -701,7 +699,7 @@ module.exports = {
   fetchClientVersion,
   fetchSuperSecretKey,
 
-  // Express‐related exports (so app-core.js can do: const { setupExpressServer, … } = require('./app-env')):
+  // Express-related exports:
   setupExpressServer,
   ensureSystemSettingsInitiated,
   serveOctoFarmRoutes,
