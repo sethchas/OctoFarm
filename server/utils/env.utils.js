@@ -3,14 +3,15 @@
 const path = require("path");
 const fs = require("fs");
 const dotenv = require("dotenv");
-const isDocker = require("is-docker");
+const isDocker = require("is-docker"); // note: `require("is-docker")` returns a boolean
 const Logger = require("../handlers/logger.js");
 const { LOGGER_ROUTE_KEYS } = require("../constants/logger.constants");
 
+// We pass `false` as the second argument so that logger doesn’t try to write to a “logs/” folder before we create it.
 const logger = new Logger(LOGGER_ROUTE_KEYS.UTILS_ENV_LOGGER, false);
 
 /**
- * Detect if running under PM2 (by checking for known PM2 env vars).
+ * Returns true if the process is running under PM2.
  */
 function isPm2() {
   return (
@@ -21,7 +22,7 @@ function isPm2() {
 }
 
 /**
- * Detect if running under nodemon (by looking at the lifecycle script).
+ * Returns true if nodemon is running this script.
  */
 function isNodemon() {
   return (
@@ -31,18 +32,15 @@ function isNodemon() {
 }
 
 /**
- * Detect if running inside a PKG‐wrapped binary (NODE will be defined by PKG).
+ * Returns true if NODE was explicitly invoked (rare).
  */
 function isNode() {
   return "NODE" in process.env;
 }
 
 /**
- * Convert an object of key/value pairs into a dotenv‐style string.
- * Copied/adapted from https://github.com/bevry/envfile
- *
- * @param {{ [key: string]: string }} obj
- * @returns {string}
+ * Turn an object into a string suitable for writing to a .env file.
+ * (Copied from https://github.com/bevry/envfile)
  */
 function stringifyDotEnv(obj) {
   let result = "";
@@ -55,129 +53,121 @@ function stringifyDotEnv(obj) {
 }
 
 /**
- * Write or update one environment variable in the .env file.
+ * Write (or update) a single key=value pair in the given .env file.
  *
- * @param {string} absoluteEnvPath  Absolute path to the .env file (e.g. "/OctoFarm/.env")
- * @param {string} variableKey      The key to set (e.g. "MONGO")
- * @param {string|number} variableValue  The value to write (e.g. "mongodb://127.0.0.1:27017/octofarm")
+ * - absoluteEnvPath must be an absolute path to the .env file (e.g. /OctoFarm/.env).
+ * - variableKey is the environment‐variable name (e.g. "SUPER_SECRET_KEY").
+ * - variableValue is the new value (string, number, etc).
+ *
+ * In Docker containers we do not persist .env changes, so if isDocker is true we simply bail out.
  */
 function writeVariableToEnvFile(absoluteEnvPath, variableKey, variableValue) {
-  if (isDocker()) {
-    logger.error("Attempted to write to .env within Docker—skipping persistence.");
+  if (isDocker) {
+    logger.error("Tried to persist setting to .env in Docker mode. Skipping.");
     return;
   }
 
-  // Load existing .env (if present)
-  const configResult = dotenv.config({ path: absoluteEnvPath });
-  if (configResult.error && configResult.error.code === "ENOENT") {
-    logger.warning(`.env not found at ${absoluteEnvPath}, creating a new one.`);
-  } else if (configResult.error) {
-    logger.error("Failed to parse existing .env file:", configResult.error);
+  // Load the current .env (if missing, dotenv.config() will set .parsed to {} and .error.code === "ENOENT")
+  const current = dotenv.config({ path: absoluteEnvPath });
+  if (current.error && current.error.code !== "ENOENT") {
+    logger.error("Could not parse existing .env file:", current.error);
     throw new Error(
-      "Could not parse current .env file. Please ensure it contains valid KEY=VALUE lines."
+      "Failed to parse .env file. Make sure it uses KEY=VALUE lines only."
     );
   }
+  if (current.error && current.error.code === "ENOENT") {
+    logger.warning("Creating .env file because it did not exist:", absoluteEnvPath);
+  }
 
-  // Merge old values with the new one
-  const newEnv = {
-    ...(configResult.parsed || {}),
-    [variableKey]: String(variableValue),
+  // Merge existing parsed values (if any) with the new one:
+  const newEnvObject = {
+    ...((current.parsed && typeof current.parsed === "object") ? current.parsed : {}),
+    [variableKey]: variableValue,
   };
 
-  const newDotEnvContent = stringifyDotEnv(newEnv);
-
-  try {
-    fs.writeFileSync(absoluteEnvPath, newDotEnvContent);
-    logger.info(`Updated ${variableKey} in ${absoluteEnvPath}`);
-  } catch (err) {
-    logger.error(`Failed to write to .env at ${absoluteEnvPath}`, err);
-    throw err;
-  }
+  // Serialize back to text:
+  const newEnvText = stringifyDotEnv(newEnvObject);
+  fs.writeFileSync(absoluteEnvPath, newEnvText);
+  logger.info(`✓ Wrote ${variableKey} to ${absoluteEnvPath}`);
 }
 
 /**
- * Verify that package.json exists at the given rootPath and has the correct "name" field.
+ * Verify that package.json exists at project root and has name === "octofarm-server".
  *
- * @param {string} rootPath  Absolute path to the project root (e.g. "/OctoFarm")
- * @returns {boolean}        True if package.json is found and named "octofarm-server"
+ * Returns true if everything checks out, or false (and logs errors) if not.
  */
 function verifyPackageJsonRequirements(rootPath) {
-  const packageJsonPath = path.join(rootPath, "package.json");
-  if (!fs.existsSync(packageJsonPath)) {
-    logger.error(`Could not find 'package.json' in ${rootPath}`);
-    return false;
-  }
-
-  let pkg;
   try {
-    pkg = require(packageJsonPath);
+    const dirContents = fs.readdirSync(rootPath);
+    if (!dirContents.includes("package.json")) {
+      logger.error(`FAILURE: could not find 'package.json' in root (${rootPath})`);
+      return false;
+    }
+    const pkg = require(path.join(rootPath, "package.json"));
+    if (!pkg.name) {
+      logger.error("X 'name' property is missing from package.json. Aborting.");
+      return false;
+    }
+    if (pkg.name.toLowerCase() !== "octofarm-server") {
+      logger.error(
+        `X package.json.name (${pkg.name.toLowerCase()}) !== 'octofarm-server'. Aborting.`
+      );
+      return false;
+    }
+    logger.debug("✓ Validated package.json name === 'octofarm-server'.");
+    return true;
   } catch (err) {
-    logger.error("Failed to load package.json:", err);
+    logger.error("Error while verifying package.json requirements:", err);
     return false;
   }
-
-  const packageName = (pkg.name || "").toLowerCase();
-  if (!packageName) {
-    logger.error("Missing 'name' in package.json. Aborting OctoFarm.");
-    return false;
-  }
-
-  if (packageName !== "octofarm-server") {
-    logger.error(
-      `Unexpected package.json name: '${packageName}'. Expected 'octofarm-server'. Aborting.`
-    );
-    return false;
-  }
-
-  logger.debug("✓ Verified package.json of octofarm-server");
-  return true;
 }
 
 /**
- * Ensure that a background image (bg.jpg) exists under "<rootPath>/images".
- * If the "images" folder does not exist, create it. If bg.jpg is missing,
- * copy the default from "server/utils/bg_default.jpg".
+ * Ensure that an /images folder exists under the project root,
+ * and that a "bg.jpg" is present. If missing, copy over the default.
  *
- * @param {string} rootPath  Absolute path to project root (e.g. "/OctoFarm")
+ * - rootPath should be the absolute path to your project’s root directory (e.g. "/OctoFarm").
+ *
+ * This no longer tries to create “../images” relative to the running directory;
+ * instead it always uses the project root in order to avoid EACCES when PM2 is launched.
  */
 function ensureBackgroundImageExists(rootPath) {
-  // 1) Build absolute path to "<rootPath>/images"
-  const targetBgDir = path.resolve(rootPath, "images");
+  // 1) Target directory for runtime images:
+  const targetBgDir = path.join(rootPath, "images");
   const targetBgPath = path.join(targetBgDir, "bg.jpg");
 
-  // 2) If "<rootPath>/images" doesn’t exist, make it.
+  // 2) If /images folder does not exist yet, create it:
   if (!fs.existsSync(targetBgDir)) {
     try {
       fs.mkdirSync(targetBgDir, { recursive: true });
-      logger.info(`Created images directory at ${targetBgDir}`);
-    } catch (err) {
-      logger.error(`Failed to create images directory: ${targetBgDir}`, err);
+      logger.info("✓ Created images folder at:", targetBgDir);
+    } catch (mkdirErr) {
+      logger.error("✗ Failed to create images folder:", mkdirErr);
       return;
     }
   }
 
-  // 3) If "bg.jpg" is missing, copy default
-  if (!fs.existsSync(targetBgPath)) {
-    // Assume default lives at "<rootPath>/server/utils/bg_default.jpg"
-    const defaultBgPath = path.resolve(rootPath, "server/utils/bg_default.jpg");
+  // 3) If bg.jpg is already present, we’re done:
+  if (fs.existsSync(targetBgPath)) {
+    logger.debug("✓ Background image already exists:", targetBgPath);
+    return;
+  }
 
-    if (!fs.existsSync(defaultBgPath)) {
-      logger.error("Cannot find default background:", defaultBgPath);
-      return;
-    }
+  // 4) Otherwise, attempt to copy the default from server/utils/bg_default.jpg
+  //    We assume bg_default.jpg sits in <root>/server/utils/bg_default.jpg
+  const defaultBgPath = path.join(rootPath, "server", "utils", "bg_default.jpg");
+  if (!fs.existsSync(defaultBgPath)) {
+    logger.error("✗ Cannot find default background at:", defaultBgPath);
+    return;
+  }
 
-    try {
-      const fileBuffer = fs.readFileSync(defaultBgPath);
-      fs.writeFileSync(targetBgPath, fileBuffer);
-      logger.info(`✓ Copied default background image to ${targetBgPath}`);
-    } catch (err) {
-      logger.error(
-        `Failed to copy bg_default.jpg → ${targetBgPath}`,
-        err
-      );
-    }
-  } else {
-    logger.debug(`Background already exists at ${targetBgPath}`);
+  // 5) Copy default → <root>/images/bg.jpg
+  try {
+    const buffer = fs.readFileSync(defaultBgPath);
+    fs.writeFileSync(targetBgPath, buffer);
+    logger.info(`✓ Copied default background to ${targetBgPath}`);
+  } catch (copyErr) {
+    logger.error("✗ Failed to copy default background:", copyErr);
   }
 }
 
