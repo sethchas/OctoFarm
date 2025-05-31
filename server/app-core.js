@@ -13,7 +13,7 @@ const {
   ensureSystemSettingsInitiated,
   serveOctoFarmRoutes,
   serveOctoFarmNormally
-} = require('./app-core');
+} = require('./app-env');
 
 
 // ────────────────────────────────────────────────────────────────────────────────
